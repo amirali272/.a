@@ -1,0 +1,251 @@
+/* ==========================================================================
+   Premium touches — additive only, no visual identity change.
+   Keeps the exact ground, palette, layout, and structure of the panel as
+   it was. Only deepens shadows, sharpens edges, and adds micro-interactions
+   that make surfaces feel physical. Load LAST. Remove the <link> to fall back.
+   ========================================================================== */
+
+/* ---- 1. Ground: the same #070707, but with a breath of life ----------- */
+
+body[data-t="dark"] {
+    background:
+        radial-gradient(1600px 1000px at 50% -10%, rgba(255, 255, 255, .018), transparent 60%),
+        #070707;
+}
+
+body[data-t="light"] {
+    background:
+        radial-gradient(1600px 1000px at 50% -10%, rgba(255, 255, 255, .5), transparent 60%),
+        #f2f2f2;
+}
+
+/* ---- 2. Cards — same shape, deeper physicality ----------------------- */
+
+.srv,
+#grid>*,
+.panel .grid3>* {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, .022), rgba(255, 255, 255, 0) 140px),
+        var(--s1);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .045),
+        0 1px 0 rgba(0, 0, 0, .4),
+        0 24px 48px -32px rgba(0, 0, 0, .95);
+    transition:
+        transform .32s cubic-bezier(.32, .72, 0, 1),
+        box-shadow .32s cubic-bezier(.32, .72, 0, 1),
+        border-color .32s ease;
+}
+
+body[data-t="light"] .srv,
+body[data-t="light"] #grid>*,
+body[data-t="light"] .panel .grid3>* {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, .9), rgba(255, 255, 255, 0) 140px),
+        var(--s1);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 1),
+        0 1px 0 rgba(0, 0, 0, .03),
+        0 24px 48px -34px rgba(0, 0, 0, .18);
+}
+
+/* ---- 3. Card hover: a 1px lift, nothing more ------------------------ */
+
+@media (hover: hover) and (pointer: fine) {
+
+    .srv:hover,
+    #grid>*:hover,
+    .panel .grid3>*:hover {
+        transform: translateY(-1px);
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, .07),
+            0 1px 0 rgba(0, 0, 0, .5),
+            0 30px 60px -34px rgba(0, 0, 0, 1);
+    }
+
+    body[data-t="light"] .srv:hover,
+    body[data-t="light"] #grid>*:hover,
+    body[data-t="light"] .panel .grid3>*:hover {
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 1),
+            0 1px 0 rgba(0, 0, 0, .04),
+            0 30px 60px -36px rgba(0, 0, 0, .22);
+    }
+}
+
+/* ---- 4. Resource tiles: a hairline between cells -------------------- */
+
+.panel .RZ {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .035),
+        0 12px 28px -24px rgba(0, 0, 0, .85);
+}
+
+body[data-t="light"] .panel .RZ {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 1),
+        0 12px 28px -26px rgba(0, 0, 0, .14);
+}
+
+/* ---- 5. Dock: same, with a slightly stronger top edge --------------- */
+
+.dock {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .05),
+        0 8px 22px -14px rgba(0, 0, 0, .85);
+}
+
+/* Doubled selector (instead of !important) to out-rank the base
+   dock.css rule for the same state without breaking any future
+   override that targets this exact selector or more specific. */
+.dock button[aria-selected="true"].dock button[aria-selected="true"],
+.dock button[aria-selected="true"] {
+    background: linear-gradient(180deg, var(--s3), var(--s2));
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .07),
+        0 0 0 1px rgba(255, 255, 255, .05),
+        0 8px 20px -12px rgba(0, 0, 0, .75);
+}
+
+/* ---- 6. Icon buttons: chrome edge, no behaviour change -------------- */
+
+.ic2,
+.HH .pal2 {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .045),
+        0 1px 4px rgba(0, 0, 0, .4);
+    transition: background .18s ease, border-color .18s ease,
+        transform .2s cubic-bezier(.32, .72, 0, 1);
+}
+
+.ic2:hover,
+.HH .pal2:hover {
+    transform: translateY(-1px);
+}
+
+.ic2:active,
+.HH .pal2:active {
+    transform: translateY(0) scale(.98);
+}
+
+/* ---- 7. Solid buttons: a bit of weight ----------------------------- */
+
+.sech2 .sb.primary,
+.btn-solid,
+.unlock {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .18),
+        0 8px 22px -10px rgba(0, 0, 0, .7);
+    transition:
+        transform .2s cubic-bezier(.32, .72, 0, 1),
+        box-shadow .2s cubic-bezier(.32, .72, 0, 1);
+}
+
+.sech2 .sb.primary:hover,
+.btn-solid:hover,
+.unlock:hover {
+    transform: translateY(-1px);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .22),
+        0 12px 28px -10px rgba(0, 0, 0, .8);
+}
+
+.sech2 .sb.primary:active,
+.btn-solid:active,
+.unlock:active {
+    transform: translateY(0) scale(.985);
+}
+
+/* ---- 8. Badge: keep as is, only add a subtle ring ------------------ */
+
+.bdg:not([hidden]) {
+    box-shadow: 0 0 0 2px var(--bg);
+}
+
+/* ---- 9. Boot screen: sharpened ring ------------------------------- */
+
+.boot-in {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .1),
+        0 6px 16px -6px rgba(0, 0, 0, .7);
+}
+
+/* ---- 10. View: fade in only on an actual section change ------------
+   Scoped to a class the router toggles (e.g. js/main.js adds
+   `.enter` to the new root node when it swaps #view's content),
+   rather than to every child unconditionally — so partial DOM
+   updates inside an existing view don't re-trigger the animation
+   or cause flicker on every re-render. */
+
+/* ---- 10. View: fade in only on an actual section change ------------
+   The router adds .enter to the new root after a real navigation and
+   removes it on animationend, so a store-driven repaint (which replaces
+   innerHTML) never re-triggers the animation. */
+
+@keyframes fadeUp {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+#view>.enter {
+    animation: fadeUp .28s cubic-bezier(.32, .72, 0, 1) both;
+}
+
+/* ---- 11. Scrollbar: thin, modern, matches the theme --------------
+   Scoped to .panel rather than the universal selector, so this
+   stays a panel-local touch instead of a page-wide behaviour
+   change if this stylesheet is ever loaded alongside other UI. */
+
+.panel,
+.panel * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--ln2) transparent;
+}
+
+.panel ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.panel ::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.panel ::-webkit-scrollbar-thumb {
+    background: var(--ln2);
+    border-radius: 10px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+.panel ::-webkit-scrollbar-thumb:hover {
+    background: var(--ln3);
+    background-clip: padding-box;
+}
+
+/* ---- 12. Reduced motion ------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+    #view>.enter {
+        animation: none !important;
+    }
+
+    .srv,
+    #grid>*,
+    .panel .grid3>*,
+    .ic2,
+    .HH .pal2,
+    .sech2 .sb.primary,
+    .btn-solid,
+    .unlock {
+        transition: none !important;
+        transform: none !important;
+    }
+}

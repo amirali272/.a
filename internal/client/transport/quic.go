@@ -1,0 +1,497 @@
+package transport
+
+import (
+	"context"
+	"crypto/subtle"
+	"fmt"
+	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/backpack/backpack/internal/metrics"
+	"github.com/backpack/backpack/internal/utils"
+	"github.com/backpack/backpack/internal/utils/handlers"
+	"github.com/backpack/backpack/internal/utils/network"
+	"github.com/backpack/backpack/internal/web"
+
+	"github.com/quic-go/quic-go"
+	"github.com/sirupsen/logrus"
+)
+
+// QuicTransport is the client side of the QUIC transport. It dials one QUIC
+// connection out to the server and carries everything over its streams: a
+// control stream for the signalling, and a stream per forwarded flow. QUIC
+// supplies the TLS 1.3, the multiplexing, the congestion control and the loss
+// recovery, so there is no smux and no KCP-style tuning to keep in step.
+type QuicTransport struct {
+	// The status shown in the panel. Behind a lock because the run being
+	// replaced and the run replacing it both write it. See tunnelStatus.
+	status          tunnelStatus
+	config          *QuicConfig
+	quicSettings    network.QUICSettings
+	parentctx       context.Context
+	state           clientState
+	logger          *logrus.Logger
+	restartMutex    sync.Mutex
+	poolConnections int32
+	loadConnections int32
+	controlFlow     chan struct{}
+
+	// connMu guards quicConn, the connection this run opens its streams on. It is
+	// replaced on every restart, so a data stream is always opened on the current
+	// connection rather than a torn-down one.
+	connMu   sync.Mutex
+	quicConn *quic.Conn
+}
+
+type QuicConfig struct {
+	RemoteAddr string
+	// Endpoints rotates through the server addresses (primary + fallbacks) so a
+	// filtered IP or blocked port does not stop the tunnel.
+	Endpoints      *network.Endpoints
+	Token          string
+	SnifferLog     string
+	Sniffer        bool
+	KeepAlive      time.Duration
+	RetryInterval  time.Duration
+	DialTimeOut    time.Duration
+	ConnPoolSize   int
+	WebPort        int
+	AggressivePool bool
+	SO_RCVBUF      int
+	SO_SNDBUF      int
+}
+
+func (c *QuicConfig) settings() network.QUICSettings {
+	return network.QUICSettings{
+		KeepAlivePeriod: c.KeepAlive,
+		MaxIdleTimeout:  quicIdleTimeout(c.KeepAlive),
+		SO_RCVBUF:       c.SO_RCVBUF,
+		SO_SNDBUF:       c.SO_SNDBUF,
+	}
+}
+
+// quicIdleTimeout mirrors the server's: silence for longer than this means the
+// peer is gone. It has to comfortably exceed the keepalive.
+func quicIdleTimeout(keepAlive time.Duration) time.Duration {
+	if keepAlive <= 0 {
+		return 30 * time.Second
+	}
+	return 3 * keepAlive
+}
+
+func NewQuicClient(parentCtx context.Context, config *QuicConfig, logger *logrus.Logger) *QuicTransport {
+	ctx, cancel := context.WithCancel(parentCtx)
+
+	client := &QuicTransport{
+		config:       config,
+		quicSettings: config.settings(),
+		parentctx:    parentCtx,
+		logger:       logger,
+		controlFlow:  make(chan struct{}, 100),
+	}
+	// Seed the first generation through the same path a restart uses, so there is
+	// only one way this state is ever published.
+	client.state.Reset(ctx, cancel, web.NewDataStore(fmt.Sprintf(":%v", config.WebPort), ctx, config.SnifferLog, config.Sniffer, client.status.get, logger))
+	return client
+}
+
+func (c *QuicTransport) setQUICConn(conn *quic.Conn) {
+	c.connMu.Lock()
+	c.quicConn = conn
+	c.connMu.Unlock()
+}
+
+func (c *QuicTransport) getQUICConn() *quic.Conn {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.quicConn
+}
+
+func (c *QuicTransport) Start() {
+	if c.config.WebPort > 0 {
+		go c.state.Usage().Monitor()
+	}
+
+	c.status.set("Disconnected (QUIC)")
+
+	go c.channelDialer()
+}
+
+func (c *QuicTransport) Restart() {
+	if !c.restartMutex.TryLock() {
+		c.logger.Warn("client is already restarting")
+		return
+	}
+	defer c.restartMutex.Unlock()
+
+	c.logger.Info("restarting client...")
+
+	// for removing timeout logs
+	level := c.logger.GetLevel()
+	c.logger.SetLevel(logrus.FatalLevel)
+
+	if c.state.Cancel() != nil {
+		c.state.Cancel()()
+	}
+
+	c.state.CloseConn()
+	// Closing the QUIC connection tears down every stream it carries, including
+	// the pool, and releases the UDP socket underneath.
+	if qc := c.getQUICConn(); qc != nil {
+		_ = qc.CloseWithError(0, "restart")
+		c.setQUICConn(nil)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// The whole tunnel may have been shut down while this restart was waiting.
+	// Rebuilding from a finished parent context would bind and close for nothing.
+	if c.parentctx.Err() != nil {
+		// The level was turned down to hide the timeouts a teardown produces;
+		// leaving it there would silence the shutdown itself.
+		c.logger.SetLevel(level)
+		// Abandoning is not a reason to keep claiming a peer. See the same
+		// branch in internal/server/transport — this end publishes the status
+		// the panel reads and the "connected" flag the watchdog reads, and both
+		// used to survive a restart that gave up.
+		c.status.set("")
+		metrics.ClearPeer()
+		c.logger.Debug("restart abandoned: the tunnel is shutting down")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(c.parentctx)
+
+	c.state.Reset(ctx, cancel, web.NewDataStore(fmt.Sprintf(":%v", c.config.WebPort), ctx, c.config.SnifferLog, c.config.Sniffer, c.status.get, c.logger))
+	c.status.set("")
+	atomic.StoreInt32(&c.poolConnections, 0)
+	atomic.StoreInt32(&c.loadConnections, 0)
+	metrics.ClearPool()
+	// The peer belongs to the generation that just ended.
+	metrics.ClearPeer()
+	drain(c.controlFlow)
+
+	c.logger.SetLevel(level)
+
+	go c.Start()
+}
+
+func (c *QuicTransport) channelDialer() {
+	c.logger.Info("attempting to establish a new quic control channel connection...")
+
+	// One backoff for this reconnect loop (see backoff.go): fixed-interval
+	// retries become exponential, so a sustained outage is probed a few times a
+	// minute rather than every second.
+	bo := newBackoff(c.config.RetryInterval)
+
+	for {
+		select {
+		case <-c.state.Ctx().Done():
+			return
+		default:
+			conn, err := network.QUICDial(c.state.Ctx(), c.config.Endpoints.Current(), c.quicSettings)
+			if err != nil {
+				c.logger.Errorf("channel dialer: %v", err)
+				// The current endpoint did not answer — move to the next one so a
+				// filtered IP or blocked port cannot stall the tunnel forever.
+				if next := c.config.Endpoints.Rotate(); c.config.Endpoints.Len() > 1 {
+					c.logger.Infof("trying next server endpoint: %s", next)
+				}
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+
+			stream, err := conn.OpenStreamSync(c.state.Ctx())
+			if err != nil {
+				c.logger.Errorf("failed to open control stream: %v", err)
+				_ = conn.CloseWithError(0, "control open failed")
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+			control := network.NewQUICStreamConn(stream, conn)
+
+			// A proof of the token, bound to this TLS session, rather than the
+			// token itself — see network/quicbind.go. The certificate is not
+			// verified, so whatever answered this dial may not be the server,
+			// and the token is the one thing it must not be handed.
+			proof, err := network.QUICClientProof(conn, c.config.Token)
+			if err != nil {
+				c.logger.Errorf("could not bind the credential to the QUIC session: %v", err)
+				_ = conn.CloseWithError(0, "binding failed")
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+			if err := utils.SendBinaryTransportString(control, proof, utils.SG_Chan); err != nil {
+				c.logger.Errorf("failed to send the control channel claim: %v", err)
+				_ = conn.CloseWithError(0, "claim send failed")
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+
+			if err := control.SetReadDeadline(time.Now().Add(c.config.DialTimeOut)); err != nil {
+				c.logger.Errorf("failed to set read deadline: %v", err)
+				_ = conn.CloseWithError(0, "deadline failed")
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+
+			message, answer, err := utils.ReceiveBinaryTransportString(control)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					c.logger.Warn("timeout while waiting for control channel response")
+				} else {
+					c.logger.Errorf("failed to receive control channel response: %v", err)
+				}
+				_ = conn.CloseWithError(0, "no response")
+				// A silent server is exactly what a filtered address looks like, so
+				// rotate before retrying.
+				if next := c.config.Endpoints.Rotate(); c.config.Endpoints.Len() > 1 {
+					c.logger.Infof("trying next server endpoint: %s", next)
+				}
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+
+			control.SetReadDeadline(time.Time{})
+
+			if why, refused := refusalReason(message, answer); refused {
+				// A server before v1.8.2 compares what it is sent with the
+				// token and so refuses a proof as a wrong token. Said here
+				// because it is the likelier reading right after an upgrade.
+				c.logger.Errorf("%s. If the server runs a version older than v1.8.2, upgrade "+
+					"it: since then this client proves the token instead of sending it, and an "+
+					"older server reads the proof as a wrong token. Retrying...", why)
+				_ = conn.CloseWithError(0, "refused")
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+			want, err := network.QUICServerProof(conn, c.config.Token)
+			if err != nil || subtle.ConstantTimeCompare([]byte(message), []byte(want)) != 1 {
+				// Not the server's proof: whatever answered does not hold the
+				// token, or holds a different TLS session from ours — which is
+				// what something terminating the TLS in between looks like.
+				c.logger.Errorf("the server did not prove it holds the token (a different token, or " +
+					"something between here and the server terminating the TLS). Retrying...")
+				_ = conn.CloseWithError(0, "bad proof")
+				bo.Wait(c.state.Ctx())
+				continue
+			}
+
+			c.setQUICConn(conn)
+			c.state.SetConn(control)
+			c.logger.Info("control channel established successfully")
+
+			// Recorded on this side too, so the panel does not have to infer a
+			// datagram tunnel's state from a socket table. See the KCP client's
+			// channelDialer for what the inference got wrong.
+			metrics.ReportPeer(conn.RemoteAddr().String())
+
+			c.status.set("Connected (QUIC)")
+
+			go c.poolMaintainer()
+			go c.channelHandler()
+
+			return
+		}
+	}
+}
+
+// poolMaintainer keeps the pool the right size. The policy is poolSizer's,
+// shared with every other client transport — see poolmaintain.go.
+func (c *QuicTransport) poolMaintainer() {
+	poolSizer{
+		ctx:        c.state.Ctx(),
+		log:        c.logger,
+		size:       c.config.ConnPoolSize,
+		aggressive: c.config.AggressivePool,
+		open:       &c.poolConnections,
+		taken:      &c.loadConnections,
+		shrink:     c.controlFlow,
+		dial:       c.tunnelDialer,
+	}.maintain()
+}
+
+func (c *QuicTransport) channelHandler() {
+	// See beatClock: learns how often the server really heartbeats.
+	beats := newBeatClock(time.Now())
+
+	msgChan := make(chan byte, 1000)
+
+	// The generation this handler belongs to, captured once.
+	//
+	// Everything below used to ask c.state.Cancel() != nil before deciding a
+	// failure was worth restarting for. That is always true: the constructor
+	// sets a cancel function before any of this can run, and Reset sets another
+	// on every restart. So the guard was open in every case it was written to
+	// close, and each goroutine dying during a teardown queued another restart
+	// of a tunnel that was already on its way down. The server transports were
+	// corrected to ask their generation's context instead; the client ones were
+	// not.
+	//
+	// Captured rather than read through c.state each time, for the same reason
+	// the server holds its context in the generation: Restart publishes a new
+	// one while these goroutines are still winding down, and a goroutine that
+	// went on to watch the new context would never see its own run end.
+	ctx := c.state.Ctx()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				// The server heartbeats regularly, so silence for longer than the
+				// keepalive period means the peer is gone. QUIC's own idle timeout
+				// would eventually notice too, but this reconnects promptly.
+				if err := c.state.Conn().SetReadDeadline(time.Now().Add(beats.deadline(c.config.KeepAlive))); err != nil {
+					c.logger.Errorf("failed to set control channel deadline: %v", err)
+					go c.Restart()
+					return
+				}
+				msg, err := utils.ReceiveBinaryByte(c.state.Conn())
+				if err != nil {
+					if hint := beats.explain(err, c.config.KeepAlive); hint != "" && ctx.Err() == nil {
+						c.logger.Warn(hint)
+					}
+					if ctx.Err() == nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							c.logger.Warn("no heartbeat from the server within the keepalive period, reconnecting")
+						} else {
+							c.logger.Error("failed to read from control channel. ", err)
+						}
+						go c.Restart()
+					}
+					return
+				}
+				if msg == utils.SG_HB {
+					beats.beat(time.Now())
+				}
+				msgChan <- msg
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = utils.SendBinaryByteWithin(c.state.Conn(), utils.SG_Closed, controlWriteTimeout)
+			return
+
+		case msg := <-msgChan:
+			switch msg {
+			case utils.SG_Chan:
+				atomic.AddInt32(&c.loadConnections, 1)
+
+				select {
+				case <-c.controlFlow: // Do nothing
+
+				default:
+					c.logger.Debug("channel signal received, initiating tunnel dialer")
+					go c.tunnelDialer()
+				}
+
+			case utils.SG_HB:
+				c.logger.Debug("heartbeat signal received successfully")
+
+			case utils.SG_Closed:
+				c.logger.Warn("control channel has been closed by the server")
+				go c.Restart()
+				return
+
+			default:
+				c.logger.Errorf("unexpected response from channel: %v.", msg)
+				go c.Restart()
+				return
+			}
+		}
+	}
+}
+
+// tunnelDialer opens one data stream, announces it, and then waits for the
+// server to name the backend it should carry.
+func (c *QuicTransport) tunnelDialer() {
+	qc := c.getQUICConn()
+	if qc == nil {
+		return
+	}
+
+	stream, err := qc.OpenStreamSync(c.state.Ctx())
+	if err != nil {
+		c.logger.Errorf("failed to open tunnel stream: %v", err)
+		return
+	}
+	data := network.NewQUICStreamConn(stream, qc)
+
+	// Announce the stream with the connection's proof so the server can
+	// authenticate it and file it as a data stream. The proof, not the token,
+	// for the reason the control claim uses one.
+	proof, err := network.QUICClientProof(qc, c.config.Token)
+	if err != nil {
+		c.logger.Errorf("could not bind the credential to the QUIC session: %v", err)
+		stream.Close()
+		return
+	}
+	if err := utils.SendBinaryTransportString(data, proof, utils.SG_TCP); err != nil {
+		c.logger.Errorf("failed to announce tunnel stream: %v", err)
+		stream.Close()
+		return
+	}
+
+	atomic.AddInt32(&c.poolConnections, 1)
+
+	// Wait until the server assigns this stream a backend to reach.
+	remoteAddr, err := utils.ReceiveBinaryString(data)
+	atomic.AddInt32(&c.poolConnections, -1)
+	if err != nil {
+		c.logger.Tracef("tunnel stream closed before use: %v", err)
+		stream.Close()
+		return
+	}
+
+	c.localDialer(data, remoteAddr)
+}
+
+// dialUDP forwards a target marked as UDP, reporting whether it took the flow.
+func (c *QuicTransport) dialUDP(stream net.Conn, remoteAddr string) bool {
+	return dialForwardedUDP(stream, remoteAddr, c.logger, c.state.Usage(), c.config.Sniffer)
+}
+
+func (c *QuicTransport) localDialer(stream net.Conn, remoteAddr string) {
+	if c.dialUDP(stream, remoteAddr) {
+		return
+	}
+	port, resolvedAddr, err := network.ResolveRemoteAddr(remoteAddr)
+	if err != nil {
+		c.logger.Infof("failed to resolve remote port: %v", err)
+		stream.Close()
+		return
+	}
+	// Pick a healthy backend when several are configured (single = unchanged).
+	resolvedAddr = backends.pick(resolvedAddr)
+
+	var sendBuf, recvBuf int
+	if strings.Contains(resolvedAddr, "127.0.0.1") {
+		sendBuf = 32 * 1024
+		recvBuf = 32 * 1024
+	} else {
+		sendBuf = c.config.SO_SNDBUF
+		recvBuf = c.config.SO_RCVBUF
+	}
+
+	localConnection, err := network.TcpDialer(c.state.Ctx(), resolvedAddr, c.config.DialTimeOut, c.config.KeepAlive, true, 1, recvBuf, sendBuf, 0)
+	if err != nil {
+		localDial.Report(c.logger, resolvedAddr, err)
+		stream.Close()
+		return
+	}
+
+	// The last hop worked, so any run of failures recorded for the panel
+	// ends here. See localdial.go.
+	ReportLocalDialOK()
+	c.logger.Debugf("connected to local address %s successfully", remoteAddr)
+
+	handlers.TCPConnectionHandler(c.state.Ctx(), false, metrics.CountedConn(stream), localConnection, c.logger, c.state.Usage(), int(port), c.config.Sniffer)
+}

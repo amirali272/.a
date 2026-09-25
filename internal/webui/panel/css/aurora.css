@@ -1,0 +1,618 @@
+/* ==========================================================================
+   Aurora — the background rebuilt, and the chrome made of the same glass
+   the cards already were.
+
+   glow.css lit the surfaces that already existed. This one changes what two
+   things actually are: the ground behind the panel, which was flat bars and
+   is now a slow field of colour they sit inside; and the chrome — header,
+   dock, the small buttons, dialogs and popovers — which was opaque var(--s1)
+   and is now --glass, the same material .c7 has always been. The panel was
+   glass cards on a solid frame; this makes it glass throughout, with a bit
+   more air between things.
+
+   Additive again: no class renamed, no control moved. Load LAST, after
+   glow.css. Remove the <link> to fall back one layer at a time — losing this
+   file loses only the glass chrome and the aurora, never functionality.
+   ========================================================================== */
+
+/* ---- 1. The ground: a field, not just bars ------------------------------
+   Three soft, heavily blurred discs behind .bgbars, each drifting on its own
+   slow, non-repeating-looking loop. Built on --ac, the same variable the
+   primary button and the active tab already answer to, so the ground picks
+   up whatever accent is chosen instead of being a fixed colour of its own —
+   an operator with no accent gets a field in --tx at very low strength,
+   which reads as depth rather than as colour.
+   Markup: three empty <i> inside #aurora, added once in index.html next to
+   .bgbars. A missing element degrades to nothing painted, not to an error. */
+#aurora{position:fixed;inset:-15% -10%;z-index:-1;pointer-events:none;
+  overflow:hidden;filter:blur(90px) saturate(150%);opacity:.5;
+  transform:translateZ(0)}
+#aurora i{position:absolute;display:block;border-radius:50%;
+  background:radial-gradient(circle,var(--ac) 0%,transparent 72%)}
+#aurora i:nth-child(1){width:56vw;height:56vw;top:-16%;left:-10%;
+  animation:auroraA 28s ease-in-out infinite}
+#aurora i:nth-child(2){width:46vw;height:46vw;bottom:-18%;right:-8%;
+  opacity:.85;animation:auroraB 34s ease-in-out infinite}
+#aurora i:nth-child(3){width:40vw;height:40vw;top:34%;left:36%;
+  opacity:.55;animation:auroraC 23s ease-in-out infinite}
+@keyframes auroraA{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(6%,5%) scale(1.1)}}
+@keyframes auroraB{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-6%,-5%) scale(1.06)}}
+@keyframes auroraC{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-5%,6%) scale(1.12)}}
+body[data-t="light"] #aurora{opacity:.26}
+@media (prefers-reduced-motion:reduce){ #aurora i{animation:none} }
+@media (prefers-reduced-transparency:reduce),(prefers-contrast:more){ #aurora{display:none} }
+
+/* ---- 2. Header and dock: glass, not a solid bar over the aurora --------
+   Both were var(--s1)/var(--s2), a flat panel sitting on top of the ground.
+   --glass is the same translucent-plus-blur material .c7 has always used, so
+   the chrome now shows the aurora moving behind it exactly as a card would,
+   instead of hiding it under an opaque strip. */
+.HH{
+  background:var(--glass);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border-bottom:1px solid var(--glass-edge)
+}
+.panel .stickH{background:transparent}
+.panel .dock{
+  background:var(--glass-solid);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border-color:var(--glass-edge)
+}
+
+/* ---- 3. Small buttons: the same material, a softer shape ---------------
+   .ic2 and .pal2 were solid var(--s1) squares at radius 10. Glass first, and
+   the radius opened a couple of pixels — 34px controls read better a touch
+   rounder, closer to the 28px cards than to the sharper 9px card-footer
+   icons, which keep their own smaller radius unchanged since they sit inside
+   an already-rounded card and a bigger radius there would fight the corner
+   it is next to. */
+.ic2,.HH .pal2{
+  background:var(--glass-solid);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border-color:var(--glass-edge);
+  border-radius:12px
+}
+.c7 .btn,.map .btn{
+  background:var(--glass-solid);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border-color:var(--glass-edge)
+}
+/* The secondary action on a screen ("Cancel", "Add another") reads as glass
+   too; the primary one stays solid on purpose — accent.css and glow.css
+   already spend real weight making it the one thing that is not glass, which
+   is what tells the eye which button actually commits something. */
+.sech2 .sb:not(.primary){
+  background:var(--glass-solid);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border-color:var(--glass-edge)
+}
+
+/* ---- 4. Dialogs and popovers: the same glass, not a separate opaque one - */
+.dlg,.appear,.c7 .permenu,.c7 .card-more{
+  background:var(--glass-solid);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border-color:var(--glass-edge)
+}
+
+/* ---- 5. A little more air between things --------------------------------
+   The grid gaps and the space around the dock were tuned tight; a shade more
+   room reads calmer once the chrome itself has depth to it, and none of these
+   are large enough to break a container-query breakpoint tuned against the
+   old numbers — every rule that reacted to width still reacts to the same
+   width, only the resting gap grew by two or three pixels. */
+#grid{gap:18px}
+.panel .grid3{gap:16px}
+.panel .sectitle{margin:26px 0 13px}
+
+/* ---- 6. Header cluster and divider, and room for the reordered nav -----
+   .hcluster and .hdiv are new elements added in index.html alongside this
+   file: appearance and alerts grouped together, a hairline before logout so
+   the one action that ends the session doesn't sit in the same row of dots
+   as the two that only adjust how the panel looks. #strip picks up a little
+   top margin now that the dock sits above it instead of below — it used to
+   get that space from .dockZ's own top padding. */
+.hcluster{display:flex;align-items:center;gap:8px}
+.hdiv{width:1px;align-self:stretch;margin:7px 2px;background:var(--glass-edge)}
+@container hdr (max-width:470px){ .hdiv{display:none} }
+#strip{margin-top:14px}
+.panel .dockZ{padding:20px 0 4px}
+
+/* ---- 7. The same guards this whole panel already sets ------------------- */
+@media (prefers-reduced-motion:reduce){
+  .HH,.panel .dock,.ic2,.HH .pal2,.c7 .btn,.map .btn,.sech2 .sb{transition:none!important}
+}
+
+/* ==========================================================================
+   Panel-wide glass — every control gets the material, not just the ones
+   glow.css and this file already named.
+
+   Everything above this point glassed the chrome that had a name: the
+   header, the dock, the icon buttons, the primary action, the card. Every
+   screen past the dashboard was drawn against the same preview but kept its
+   own button and switch classes — .btn2 on the add form, .nb on the log
+   toolbar, .sw3/.sww on two different drawers, .chip0 on the history filter
+   — and none of them inherited what the shared chrome already has. This
+   section is the same three ingredients (--glass-solid, --glass-blur,
+   --glass-edge) and the same two motions (a spring lift on hover, a scale
+   press on click) applied once, generically, to that whole second set — so
+   a button reads as the same kind of thing everywhere it appears, not just
+   on the three screens that happened to share a class name with glow.css.
+
+   Additive, same as every layer above: nothing here is load-bearing, no
+   selector removes a rule, it only adds the material and the motion on top
+   of whatever colour and size each screen already gave its own controls.
+   ========================================================================== */
+
+:root{
+  /* One extra token this layer needs that tokens.css had no reason to carry:
+     the width of the glass edge highlight, named so every rule below agrees
+     on it instead of six copies of "1px" that drift apart over time. */
+  --glass-press:cubic-bezier(.32,.72,0,1);
+}
+
+/* ---- 1. The generic surface every control below is built from ---------- */
+button,
+.btn2,.btn6,.btns6 .btn6,
+.act,.actS,
+.nb,
+.chip0,.chip2,.sidechip,
+.modeswap,
+.seg button,.segs button,
+.tabs button,
+.sel,.sel4{
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  transition:
+    background .2s ease,
+    border-color .2s ease,
+    box-shadow .25s var(--spring),
+    transform .2s var(--glass-press);
+}
+
+/* Controls that were flat var(--s1)/var(--s2) chips become the same glass
+   the header and the cards already are. Excludes anything glow.css/aurora's
+   own section 2-4 already claimed (.sech2 .sb, .ic2, .pal2, .dock button,
+   .c7 .btn) so this never fights a more specific rule with the same load
+   order — it only reaches controls nothing above has touched yet. */
+.btn2,.btn6,.btns6 .btn6,
+.act,.actS,
+.nb:not(.solid2),
+.chip0,.chip2,.sidechip,
+.modeswap,
+.seg button,.segs button,
+.tabs button,
+.sel,.sel4{
+  background:var(--glass-solid);
+  border-color:var(--glass-edge);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 1px 4px rgba(0,0,0,.35);
+}
+body[data-t="light"] .btn2,body[data-t="light"] .btn6,body[data-t="light"] .btns6 .btn6,
+body[data-t="light"] .act,body[data-t="light"] .actS,
+body[data-t="light"] .nb:not(.solid2),
+body[data-t="light"] .chip0,body[data-t="light"] .chip2,body[data-t="light"] .sidechip,
+body[data-t="light"] .modeswap,
+body[data-t="light"] .seg button,body[data-t="light"] .segs button,
+body[data-t="light"] .tabs button,
+body[data-t="light"] .sel,body[data-t="light"] .sel4{
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 1px 3px rgba(0,0,0,.05);
+}
+
+/* The solid, commits-something buttons this second set has (.nb.solid2, the
+   log toolbar's primary, a drawer's save) pick up the same lit-from-within
+   treatment .sech2 .sb.primary already has once an accent is chosen. */
+body[data-accent] .nb.solid2,
+body[data-accent] .btn6.solid,
+body[data-accent] .btns6 .btn6.solid{
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.18),
+    0 8px 22px -10px rgba(0,0,0,.7),
+    0 0 24px -8px color-mix(in srgb,var(--ac) 55%,transparent);
+}
+
+/* ---- 2. One hover lift, one press, everywhere --------------------------
+   The same 1px rise and .97 compress .ic2/.pal2/the primary button already
+   use, so a hand moving across the panel feels one material throughout
+   instead of some controls answering and others sitting dead under the
+   cursor. */
+@media (hover:hover) and (pointer:fine){
+  .btn2:hover,.btn6:hover,.btns6 .btn6:hover,
+  .act:hover,.actS:hover,
+  .nb:hover,
+  .chip0:hover,.chip2:hover,.sidechip:hover,
+  .modeswap:hover,
+  .seg button:hover,.segs button:hover,
+  .tabs button:hover{
+    transform:translateY(-1px);
+    border-color:var(--glass-edge);
+  }
+}
+.btn2:active,.btn6:active,.btns6 .btn6:active,
+.act:active,.actS:active,
+.nb:active,
+.chip0:active,.chip2:active,.sidechip:active,
+.modeswap:active,
+.seg button:active,.segs button:active,
+.tabs button:active{
+  transform:translateY(0) scale(.965);
+}
+
+/* The control that says which one is picked — a tab, a segment, a filter
+   chip already toggled on — answers to the accent exactly the way the dock's
+   active tab does, so "selected" reads as one visual language across the
+   whole panel rather than a different colour per screen. */
+body[data-accent] .seg button[aria-selected="true"],
+body[data-accent] .segs button[aria-selected="true"],
+body[data-accent] .tabs button[aria-selected="true"],
+body[data-accent] .chip0.on,body[data-accent] .chip2.on,
+body[data-accent] .sidechip.on{
+  border-color:color-mix(in srgb,var(--ac) 45%,var(--glass-edge));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.08),
+    0 0 16px -6px color-mix(in srgb,var(--ac) 45%,transparent);
+  color:var(--tx);
+}
+
+/* ---- 3. Switches: a glass track, a thumb that actually looks thrown ---- */
+.sw3,.sww,.sww2,.sw6,.sw0{
+  background:var(--glass-solid);
+  border:1px solid var(--glass-edge);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  transition:background .25s var(--spring),border-color .25s var(--spring);
+}
+.sw3 i,.sww i,.sww2 i,.sw6 i,.sw0 i{
+  box-shadow:0 1px 3px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.5);
+  transition:transform .28s var(--spring),background .25s ease;
+}
+body[data-accent] .sw3.on,body[data-accent] .sww.on,body[data-accent] .sww2.on,
+body[data-accent] .sw6.on,body[data-accent] .sw0.on{
+  background:color-mix(in srgb,var(--ac) 30%,var(--glass-solid));
+  border-color:color-mix(in srgb,var(--ac) 50%,var(--glass-edge));
+  box-shadow:0 0 14px -5px color-mix(in srgb,var(--ac) 55%,transparent);
+}
+
+/* ---- 4. Cards this set has that .srv/#grid/.grid3 never covered -------- */
+.card6,.box,.drawer,.row2,.row6,.arow,.certrow,.navrow,.chartbox{
+  background:var(--glass-solid);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-edge);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.045),0 1px 0 rgba(0,0,0,.4),0 20px 40px -30px rgba(0,0,0,.9);
+  transition:transform .3s var(--glass-press),box-shadow .3s var(--glass-press),border-color .3s ease;
+}
+body[data-t="light"] .card6,body[data-t="light"] .box,body[data-t="light"] .drawer,
+body[data-t="light"] .row2,body[data-t="light"] .row6,body[data-t="light"] .arow,
+body[data-t="light"] .certrow,body[data-t="light"] .navrow,body[data-t="light"] .chartbox{
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.95),0 1px 0 rgba(0,0,0,.03),0 20px 40px -32px rgba(0,0,0,.15);
+}
+@media (hover:hover) and (pointer:fine){
+  .card6:hover,.arow:hover,.certrow:hover,.navrow:hover{
+    transform:translateY(-1px);
+    border-color:color-mix(in srgb,var(--tx) 20%,var(--glass-edge));
+  }
+}
+
+/* ---- 5. Specular sweep — the one purely decorative touch --------------
+   A single soft diagonal highlight that crosses a solid/primary button on
+   hover, the way light actually moves across a curved pane of glass rather
+   than sitting on it as a static gradient. Kept to the controls that are
+   already the "this is glass and it is lit" set, so it reads as one more
+   degree of the same material instead of a new effect competing with it. */
+.sech2 .sb.primary,.btn-solid,.unlock,.nb.solid2,.btn6.solid,.dlg .btn6.solid{
+  position:relative;overflow:hidden;
+}
+.sech2 .sb.primary::after,.btn-solid::after,.unlock::after,
+.nb.solid2::after,.btn6.solid::after,.dlg .btn6.solid::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(115deg,transparent 35%,rgba(255,255,255,.22) 48%,transparent 60%);
+  transform:translateX(-140%);pointer-events:none;
+}
+@media (hover:hover) and (pointer:fine){
+  .sech2 .sb.primary:hover::after,.btn-solid:hover::after,.unlock:hover::after,
+  .nb.solid2:hover::after,.btn6.solid:hover::after,.dlg .btn6.solid:hover::after{
+    animation:glassSweep .85s var(--spring);
+  }
+}
+@keyframes glassSweep{ to{ transform:translateX(140%); } }
+
+/* ---- 6. The same guards every layer here already sets ------------------ */
+@media (prefers-reduced-motion:reduce){
+  .btn2,.btn6,.btns6 .btn6,.act,.actS,.nb,.chip0,.chip2,.sidechip,.modeswap,
+  .seg button,.segs button,.tabs button,.card6,.box,.drawer,.row2,.row6,
+  .arow,.certrow,.navrow,.chartbox,.sw3 i,.sww i,.sww2 i,.sw6 i,.sw0 i{
+    transition:none!important;transform:none!important;
+  }
+  .sech2 .sb.primary::after,.btn-solid::after,.unlock::after,
+  .nb.solid2::after,.btn6.solid::after,.dlg .btn6.solid::after{
+    animation:none!important;display:none;
+  }
+}
+@media (prefers-reduced-transparency:reduce),(prefers-contrast:more){
+  .btn2,.btn6,.btns6 .btn6,.act,.actS,.nb,.chip0,.chip2,.sidechip,.modeswap,
+  .seg button,.segs button,.tabs button,.sel,.sel4,
+  .sw3,.sww,.sww2,.sw6,.sw0,
+  .card6,.box,.drawer,.row2,.row6,.arow,.certrow,.navrow,.chartbox{
+    -webkit-backdrop-filter:none!important;backdrop-filter:none!important;
+  }
+}
+
+/* ==========================================================================
+   Liquid glass — a second pass, this time on the material itself rather
+   than on coverage.
+
+   Everything above made every control the same glass. This makes that glass
+   read as glass rather than as a blurred rectangle: a grain fine enough to
+   fool the eye into believing there is a physical pane there, a highlight
+   that sits where light actually lands on a curved surface instead of a
+   flat gradient across the whole face, pills instead of squared corners on
+   the two things a hand reaches for most (the primary action, the section
+   you are on), and an entrance that arrives a card at a time instead of as
+   one block. Load LAST, same as everything else here.
+   ========================================================================== */
+
+/* ---- 1. Grain — the one honest cheat behind every "real" glass UI ------
+   A blur alone reads as a Photoshop filter; real glass has microscopic
+   imperfections that catch light unevenly. A few percent of luminance noise
+   over the whole page is what the eye actually uses to believe a surface is
+   physical rather than rendered — screen recordings of iOS/visionOS glass
+   carry exactly this, just below the threshold of being "seen" on its own.
+   Fixed and pointer-events:none, so it costs nothing to interact through and
+   repaints nothing on scroll. */
+/* A pseudo-element on body rather than a new DOM node — no markup to add,
+   and it inherits body's own stacking without needing its own z-index
+   fight against #boot (200) or the panel content (1). */
+body::after{
+  content:'';position:fixed;inset:0;z-index:150;pointer-events:none;
+  opacity:.035;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+body[data-t="light"]::after{opacity:.02}
+@media (prefers-reduced-transparency:reduce),(prefers-contrast:more){ body::after{display:none} }
+
+/* ---- 2. Specular highlight — light lands, it doesn't paint ------------
+   Every glass surface gets one soft highlight anchored to its top-left, the
+   way light actually falls on a curved pane, instead of the flat straight
+   top edge a border alone gives you. A ::before so it never fights the
+   sweep ::after glow.css/section 5 above already put on the solid buttons. */
+.c7,.srv,#grid>*,.panel .grid3>*,
+.dlg,.c7 .permenu,.c7 .card-more,
+.card6,.box,.drawer,
+.ic2,.HH .pal2,.sech2 .sb,.btn2,.btn6,.act,.nb{
+  position:relative;
+}
+.c7::before,.srv::before,#grid>*::before,.panel .grid3>*::before,
+.dlg::before,.appear::before,
+.card6::before,.box::before,.drawer::before{
+  content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(120% 60% at 18% -10%,rgba(255,255,255,.10),transparent 55%);
+  mix-blend-mode:plus-lighter;
+}
+body[data-t="light"] .c7::before,body[data-t="light"] .srv::before,
+body[data-t="light"] #grid>*::before,body[data-t="light"] .panel .grid3>*::before,
+body[data-t="light"] .dlg::before,body[data-t="light"] .appear::before,
+body[data-t="light"] .card6::before,body[data-t="light"] .box::before,
+body[data-t="light"] .drawer::before{
+  background:radial-gradient(120% 60% at 18% -10%,rgba(255,255,255,.65),transparent 55%);
+}
+/* Small glass (icon buttons, chips) gets the same light at a smaller radius
+   footprint, or a 34px control ends up with a highlight sized for a card. */
+.ic2::before,.HH .pal2::before,.sech2 .sb::before,.btn2::before,.btn6::before,.act::before,.nb::before{
+  content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(160deg,rgba(255,255,255,.14),transparent 65%);
+  mix-blend-mode:plus-lighter;
+}
+body[data-t="light"] .ic2::before,body[data-t="light"] .HH .pal2::before,
+body[data-t="light"] .sech2 .sb::before,body[data-t="light"] .btn2::before,
+body[data-t="light"] .btn6::before,body[data-t="light"] .act::before,body[data-t="light"] .nb::before{
+  background:linear-gradient(160deg,rgba(255,255,255,.8),transparent 65%);
+}
+
+/* ---- 3. Pills — the two controls a hand reaches for most --------------
+   The primary action and "which section am I in" are the two things this
+   panel is touched for constantly; a full pill reads as more liquid than a
+   rounded square and, practically, gives both a bigger, easier hit target
+   without widening anything — the box only got rounder, not bigger. */
+.sech2 .sb.primary,.btn-solid,.unlock,.nb.solid2,.btn6.solid,.dlg .btn6.solid{
+  border-radius:999px;
+}
+.panel .dock button{
+  border-radius:14px;
+}
+body[data-accent] .panel .dock button.on{
+  border-radius:999px;
+}
+
+/* ---- 4. Entrance — a card at a time, not a block -----------------------
+   leather.css already fades #view>.enter up as one piece. Inside that, the
+   tunnel/server grid gets a second, finer stagger — each card 40ms behind
+   the last, capped at ten so a long list doesn't leave the eleventh card
+   waiting a visible beat. Reuses the same spring the rest of the panel
+   already answers to. */
+/* .enter lands on the new view's root node (router.js), a child of #view —
+   never on #view itself — so this has to be a descendant selector, not
+   #view.enter, or it matches nothing on every real navigation. */
+#view .enter #grid>*,#view .enter .panel .grid3>*{
+  animation:cardIn .5s var(--spring) both;
+}
+#view .enter #grid>*:nth-child(1),#view .enter .panel .grid3>*:nth-child(1){animation-delay:.02s}
+#view .enter #grid>*:nth-child(2),#view .enter .panel .grid3>*:nth-child(2){animation-delay:.06s}
+#view .enter #grid>*:nth-child(3),#view .enter .panel .grid3>*:nth-child(3){animation-delay:.10s}
+#view .enter #grid>*:nth-child(4),#view .enter .panel .grid3>*:nth-child(4){animation-delay:.14s}
+#view .enter #grid>*:nth-child(5),#view .enter .panel .grid3>*:nth-child(5){animation-delay:.18s}
+#view .enter #grid>*:nth-child(6),#view .enter .panel .grid3>*:nth-child(6){animation-delay:.22s}
+#view .enter #grid>*:nth-child(n+7),#view .enter .panel .grid3>*:nth-child(n+7){animation-delay:.26s}
+@keyframes cardIn{
+  from{opacity:0;transform:translateY(10px) scale(.98)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+
+/* ---- 5b. The header pill — fixing the flat-button look -----------------
+   .pal2/.ic2 sit on the header, which section 2 at the top of this file
+   already turned to --glass. Glass on glass with the same near-white
+   material and a tight 4px/.4-alpha shadow (leather.css §6) is why it read
+   as a plain sticker button in light mode: the pill and the bar behind it
+   are the same colour, so the only thing left visible was that hard shadow.
+   This replaces the shadow with the same soft, wide elevation the cards
+   already use, and gives the pill its own shape so it reads as a control
+   sitting ON the header rather than a patch of the same material. */
+.HH .pal2,.HH .ic2{
+  border-radius:999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.06),
+    0 1px 0 rgba(0,0,0,.3),
+    0 10px 24px -14px rgba(0,0,0,.65);
+}
+body[data-t="light"] .HH .pal2,body[data-t="light"] .HH .ic2{
+  /* var(--s1) is #fff in light mode, same as most of what sits behind the
+     header, so the pill needs a touch of its own tone or it disappears
+     into the bar the way it did before — not a colour, just enough tint
+     that the material still reads as a separate object at rest. */
+  background:color-mix(in srgb,var(--glass-solid) 92%,var(--tx) 5%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.9),
+    0 1px 0 rgba(0,0,0,.03),
+    0 10px 22px -16px rgba(0,0,0,.18);
+}
+@media (hover:hover) and (pointer:fine){
+  .HH .pal2:hover,.HH .ic2:hover{
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.08),
+      0 1px 0 rgba(0,0,0,.3),
+      0 14px 30px -16px rgba(0,0,0,.7);
+  }
+  body[data-t="light"] .HH .pal2:hover,body[data-t="light"] .HH .ic2:hover{
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.95),
+      0 1px 0 rgba(0,0,0,.03),
+      0 14px 26px -16px rgba(0,0,0,.2);
+  }
+}
+/* The swatch dot (.sw0) is the one spot of real colour in that whole pill —
+   give it a hairline ring so it reads as inset into the glass rather than
+   pasted on top of it, and a faint glow once an accent picks a live colour. */
+.HH .pal2 .sw0{box-shadow:0 0 0 2px var(--glass-edge),inset 0 0 0 1px rgba(0,0,0,.15)}
+body[data-accent] .HH .pal2 .sw0{box-shadow:0 0 0 2px var(--glass-edge),0 0 8px -1px color-mix(in srgb,var(--ac) 60%,transparent)}
+
+/* ---- 5c. Boot / loading screen — the same glass, not bare page -------- */
+#boot{
+  background:
+    radial-gradient(720px 480px at 50% 38%,color-mix(in srgb,var(--ac) 10%,transparent),transparent 70%),
+    var(--bg);
+}
+.boot-stage{
+  padding:34px 30px 28px;border-radius:26px;
+  background:var(--glass-solid);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-edge);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.06),
+    0 30px 60px -30px rgba(0,0,0,.85);
+}
+body[data-t="light"] .boot-stage{
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.9),
+    0 30px 60px -34px rgba(0,0,0,.18);
+}
+.boot-mark{filter:drop-shadow(0 0 22px color-mix(in srgb,var(--ac) 35%,transparent))}
+.boot-in{
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.14),
+    0 0 0 1px var(--glass-edge),
+    0 10px 24px -10px rgba(0,0,0,.6);
+  animation:bootBreathe 2.6s ease-in-out infinite;
+}
+@keyframes bootBreathe{0%,100%{transform:scale(1)}50%{transform:scale(1.035)}}
+.boot-arc{stroke:var(--ac)}
+@media (prefers-reduced-motion:reduce){ .boot-in{animation:none!important} }
+
+/* ---- 5. The same guards, extended once more ----------------------------- */
+@media (prefers-reduced-motion:reduce){
+  #grain{display:none}
+  #view .enter #grid>*,#view .enter .panel .grid3>*{animation:none!important;transform:none!important}
+}
+
+/* ==========================================================================
+   Cursor light — js/main.js writes --mx/--my on whichever card the pointer
+   is over; this is the only thing that decides what happens with them.
+
+   Kept to --tx rather than a fixed white: in dark mode --tx is near-white,
+   so this reads as a highlight, exactly what the static top-left one
+   (section 2, above) already is; in light mode --tx is near-black, so the
+   same rule reads as a soft shadow pooling under the cursor instead of a
+   highlight that would never show up on a white card. One rule, and it
+   already knows which theme it is in because tokens.css already decided
+   what --tx means there — nothing here checks data-t itself.
+
+   An accent, if one is picked, gets folded in on top rather than replacing
+   --tx: a hint of it, so the light picks up whatever colour the operator
+   already chose for "this is the thing that is alive" everywhere else,
+   without turning a hover effect into a second place colour means status. */
+@media (hover:hover) and (pointer:fine){
+  .c7,.srv,#grid>*,.panel .grid3>*{ --mx:50%; --my:8%; }
+  .c7::after,.srv::after,#grid>*::after,.panel .grid3>*::after{
+    content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    opacity:0;transition:opacity .4s ease;
+    background:radial-gradient(240px circle at var(--mx) var(--my),
+      color-mix(in srgb,var(--tx) 12%,transparent),transparent 68%);
+  }
+  body[data-accent] .c7::after,body[data-accent] .srv::after,
+  body[data-accent] #grid>*::after,body[data-accent] .panel .grid3>*::after{
+    background:radial-gradient(240px circle at var(--mx) var(--my),
+      color-mix(in srgb,var(--tx) 9%,transparent),transparent 55%),
+      radial-gradient(300px circle at var(--mx) var(--my),
+      color-mix(in srgb,var(--ac) 16%,transparent),transparent 70%);
+  }
+  .c7:hover::after,.srv:hover::after,#grid>*:hover::after,.panel .grid3>*:hover::after{ opacity:1; }
+}
+@media (prefers-reduced-motion:reduce),(prefers-reduced-transparency:reduce){
+  .c7::after,.srv::after,#grid>*::after,.panel .grid3>*::after{ display:none!important; }
+}
+
+/* ==========================================================================
+   Header mark & wordmark — the one spot in the header that stayed exactly
+   as header.css first drew it while everything around it (the pill, the
+   icon buttons, the bar itself) picked up depth. A flat white square and a
+   slightly cramped wordmark next to a header that now has real shadow and
+   blur reads as the one piece nobody finished, not as a deliberate flat
+   accent — so this gives the mark the same sculpted-glass light the boot
+   screen's copy of this exact icon already has (aurora.css §5c, above),
+   and gives the wordmark the room a 32px mark next to it was already
+   implicitly asking for.
+   ========================================================================== */
+
+.HH .mk{
+  border-radius:11px;
+  background:linear-gradient(165deg,var(--tx),color-mix(in srgb,var(--tx) 82%,var(--bg)));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.5),
+    inset 0 -6px 10px -6px rgba(0,0,0,.25),
+    0 6px 16px -8px rgba(0,0,0,.55);
+}
+body[data-t="light"] .HH .mk{
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.35),
+    inset 0 -6px 10px -6px rgba(0,0,0,.2),
+    0 6px 14px -9px rgba(0,0,0,.4);
+}
+/* An accent recolours the mark (accent.css); the same light still has to
+   sit on top of whatever colour that turns out to be. */
+body[data-accent] .HH .mk{
+  background:linear-gradient(165deg,var(--ac),color-mix(in srgb,var(--ac) 78%,black));
+}
+
+/* The wordmark: -.026em at 14.5px was tuned for a mark with no shadow next
+   to it; a hair bigger and a hair looser keeps it from reading as squeezed
+   now that the mark beside it has real weight. */
+.HH .who b{
+  font-size:15.5px;
+  letter-spacing:-.015em;
+  font-weight:680;
+}
+/* The subtitle sits right under a wordmark that just got a size bump; give
+   it the same touch more room and let it read as a deliberate second line
+   (host name, once js/main.js has one to put there) rather than a sliver
+   left over from the mark above it. CSS has no way to tell "—", the
+   markup's placeholder, apart from real text, so this is a flat, modest
+   opacity rather than the two-state fade an earlier draft of this rule
+   tried to fake with a selector that could not actually see the content. */
+.HH .who small{
+  opacity:.8;
+  margin-top:2px;
+}

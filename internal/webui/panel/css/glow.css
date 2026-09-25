@@ -1,0 +1,189 @@
+/* ==========================================================================
+   Glow — additive light and motion layer.
+
+   leather.css deepened the shadows and sharpened the edges without touching
+   the identity of the panel. This goes one step further and gives it a
+   pulse: the glass reads thicker, the accent the operator picked actually
+   casts light instead of only tinting flat surfaces, and the things that are
+   alive on the page — a connected tunnel, the primary action, the section
+   you are on — say so with a glow instead of a colour change alone.
+
+   Additive only, same as leather.css: no class names change, no layout
+   moves, nothing here is load-bearing. Load LAST, after leather.css. Remove
+   the <link> to fall back to leather's already-finished look.
+   ========================================================================== */
+
+/* ---- 1. Thicker glass on the tunnel cards -------------------------------
+   --glass-blur (tokens.css) is still the base a reduced-transparency system
+   falls back to; this only turns the dial up on top of it, so a card sits
+   further forward of the ground behind it — frosted glass held an inch off
+   the page rather than a tint painted on it. */
+.c7 {
+  -webkit-backdrop-filter: blur(26px) saturate(175%);
+  backdrop-filter: blur(26px) saturate(175%);
+}
+
+/* ---- 2. Cards cast the light their border colour only hinted at --------
+   card.css already brightens the border on hover; this is the light that
+   border would actually throw. Built on --mc, the tunnel's own state colour,
+   so a card glows green, amber or the plain text colour for exactly the
+   reason it already changes border colour — nothing new is being decided
+   here, only lit. Kept faint on purpose: a glow bright enough to read from
+   across a full grid is a glow that drowns out every card beside it. */
+@media (hover: hover) and (pointer: fine) {
+  .c7,
+  .srv,
+  #grid > *,
+  .panel .grid3 > * {
+    transition:
+      border-color .3s var(--spring),
+      transform .32s cubic-bezier(.32, .72, 0, 1),
+      box-shadow .35s var(--spring);
+  }
+  .c7:hover {
+    box-shadow:
+      var(--glass-lift),
+      0 0 0 1px color-mix(in srgb, var(--mc) 38%, transparent),
+      0 0 30px -6px color-mix(in srgb, var(--mc) 42%, transparent);
+  }
+  /* The server tiles have no state colour of their own — they are not up or
+     down, they are just there — so they take the operator's accent instead,
+     the same value the primary button and the active tab already answer to. */
+  .srv:hover,
+  #grid > *:hover,
+  .panel .grid3 > *:hover {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, .07),
+      0 1px 0 rgba(0, 0, 0, .5),
+      0 30px 60px -34px rgba(0, 0, 0, 1),
+      0 0 26px -8px color-mix(in srgb, var(--ac) 35%, transparent);
+  }
+  body[data-t="light"] .srv:hover,
+  body[data-t="light"] #grid > *:hover,
+  body[data-t="light"] .panel .grid3 > *:hover {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 1),
+      0 1px 0 rgba(0, 0, 0, .04),
+      0 30px 60px -36px rgba(0, 0, 0, .22),
+      0 0 24px -8px color-mix(in srgb, var(--ac) 28%, transparent);
+  }
+}
+
+/* ---- 3. The live dot glows, not just pings ------------------------------
+   .dot already carries the ping animation (card.css). A ring that expands
+   and fades says "this changed a moment ago"; a small glow sitting under it
+   the whole time says "this is live right now" — the two read as separate
+   facts and both are true of a connected tunnel. */
+.c7 .dot {
+  box-shadow: 0 0 7px 1px color-mix(in srgb, var(--ok) 65%, transparent);
+}
+.c7 .dot.wr {
+  box-shadow:
+    0 0 7px 1px color-mix(in srgb, var(--wr) 55%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--wr) 20%, transparent);
+}
+.c7 .dot.off { box-shadow: none; }
+.panel .mp7 .dot { box-shadow: 0 0 6px 1px color-mix(in srgb, var(--ok) 60%, transparent); }
+.panel .mp7 .dot.off,
+.panel .mp7 .dot.down { box-shadow: none; }
+
+/* ---- 4. The button that commits something is lit by its own colour -----
+   Only once an accent is chosen — the monochrome panel stays monochrome,
+   exactly as accent.css already draws the line between what is status and
+   what is decoration. */
+body[data-accent] .sech2 .sb.primary,
+body[data-accent] .btn-solid,
+body[data-accent] .dlg .btn6.solid,
+body[data-accent] .unlock,
+body[data-accent] .nb.solid2 {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .18),
+    0 8px 22px -10px rgba(0, 0, 0, .7),
+    0 0 24px -8px color-mix(in srgb, var(--ac) 55%, transparent);
+  transition:
+    transform .2s cubic-bezier(.32, .72, 0, 1),
+    box-shadow .25s var(--spring);
+}
+body[data-accent] .sech2 .sb.primary:hover,
+body[data-accent] .btn-solid:hover,
+body[data-accent] .dlg .btn6.solid:hover,
+body[data-accent] .unlock:hover,
+body[data-accent] .nb.solid2:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .22),
+    0 12px 28px -10px rgba(0, 0, 0, .8),
+    0 0 34px -6px color-mix(in srgb, var(--ac) 65%, transparent);
+}
+
+/* ---- 5. The dock tells you where you are, from across the room --------- */
+body[data-accent] .panel .dock button.on {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .07),
+    0 0 0 1px rgba(255, 255, 255, .05),
+    0 8px 20px -12px rgba(0, 0, 0, .75),
+    0 0 18px -6px color-mix(in srgb, var(--ac) 50%, transparent);
+}
+
+/* ---- 6. Icon buttons pick up the same light on hover -------------------- */
+body[data-accent] .ic2:hover,
+body[data-accent] .HH .pal2:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .045),
+    0 1px 4px rgba(0, 0, 0, .4),
+    0 0 14px -5px color-mix(in srgb, var(--ac) 50%, transparent);
+}
+
+/* ---- 7. The ground drifts, not just breathes ----------------------------
+   layout.css already scales the bars' height on a loop (pulseBar). This adds
+   a second, much slower motion — a hue drift on the wash itself — so the
+   ground is never at a visual standstill even at the still point of the
+   height animation, without the height and the colour ever moving in the
+   same rhythm and reading as one mechanical pulse. Amplitude kept low for
+   the same reason layout.css keeps the bars faint: this is the horizon
+   behind the panel, not something asking to be looked at. */
+.bgbars i {
+  animation:
+    pulseBar 2s ease-in-out var(--d) infinite alternate,
+    driftHue 16s ease-in-out var(--d) infinite;
+}
+@keyframes driftHue {
+  0%, 100% { filter: hue-rotate(0deg); }
+  50% { filter: hue-rotate(10deg); }
+}
+
+/* ---- 8. A resting shimmer on the boot mark ------------------------------
+   The ring already fills as the two boot reads resolve (index.html,
+   js/main.js). While it waits, a slow sweep of light across the glyph is the
+   difference between "loading" and "stalled" at a glance. */
+.boot-in {
+  position: relative;
+  overflow: hidden;
+}
+.boot-in::after {
+  content: '';
+  position: absolute;
+  inset: -40% -10%;
+  background: linear-gradient(115deg, transparent 40%, rgba(255, 255, 255, .16) 50%, transparent 60%);
+  transform: translateX(-120%);
+  animation: bootSheen 2.6s ease-in-out infinite;
+}
+@keyframes bootSheen {
+  0% { transform: translateX(-120%); }
+  55%, 100% { transform: translateX(120%); }
+}
+
+/* ---- 9. The same guards leather.css already set, extended to this file - */
+@media (prefers-reduced-motion: reduce) {
+  .bgbars i,
+  .boot-in::after { animation: none !important; }
+  .c7,
+  .srv,
+  #grid > *,
+  .panel .grid3 > * { transition: none !important; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .c7 {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}

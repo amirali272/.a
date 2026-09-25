@@ -1,0 +1,800 @@
+package transport
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/backpack/backpack/internal/metrics"
+	"github.com/backpack/backpack/internal/utils"
+	"github.com/backpack/backpack/internal/utils/handlers"
+	"github.com/backpack/backpack/internal/utils/network"
+	"github.com/backpack/backpack/internal/web"
+
+	"github.com/sirupsen/logrus"
+)
+
+// tcpGen is the state of a single run of the transport: the context that ends
+// when the run does, and the channels its goroutines pass work over. Restart
+// builds a fresh set for the next run, so carrying them here keeps a goroutine
+// that outlives its run from reaching into the run that replaced it.
+type tcpGen struct {
+	ctx              context.Context
+	tunnelChannel    chan net.Conn
+	localChannel     chan LocalTCPConn
+	reqNewConnChan   chan struct{}
+	handshakeChannel chan controlCandidate
+	usageMonitor     *web.Usage
+}
+
+type TcpTransport struct {
+	// The listeners this transport is holding right now. Start waits on it, so
+	// "Start returned" means "the ports are free". See listeners.go.
+	listeners listenerSet
+
+	// The status shown in the panel. Behind a lock because the run being
+	// replaced and the run replacing it both write it. See tunnelStatus.
+	status    tunnelStatus
+	config    *TcpConfig
+	parentctx context.Context
+	// The current run. Replaced by Restart while the previous run's
+	// goroutines are still reading it, so it lives behind a lock.
+	run    runState
+	logger *logrus.Logger
+	// The run's channels and its usage monitor are deliberately not fields:
+	// they belong to one generation, and a field outlives the generation that
+	// made it. See Start.
+	controlChannel netControl
+	restartMutex   sync.Mutex
+	rtt            int64 // in ms, for UDP
+	limits         *limiter
+	// poolNonce is what this run's pool connections must present. It is empty
+	// while no control channel is up, and stays empty for a legacy client that
+	// cannot present one — which is what keeps the source-address fallback
+	// reachable. See network.PoolNonce.
+	poolNonce network.PoolNonce
+}
+
+type TcpConfig struct {
+	BindAddr      string
+	Token         string
+	SnifferLog    string
+	Ports         []string
+	Nodelay       bool
+	Sniffer       bool
+	KeepAlive     time.Duration
+	Heartbeat     time.Duration // in seconds
+	ChannelSize   int
+	WebPort       int
+	AcceptUDP     bool
+	MSS           int
+	SO_RCVBUF     int
+	SO_SNDBUF     int
+	ProxyProtocol bool
+	// MaxConnections caps simultaneous forwarded connections (0 = unlimited).
+	MaxConnections int
+	// BandwidthMbps caps total tunnel throughput (0 = unlimited).
+	BandwidthMbps int
+	// Stealth wraps every accepted tunnel connection in the Noise record layer,
+	// so the stream has no fingerprint for deep packet inspection to match.
+	Stealth bool
+}
+
+func NewTCPServer(parentCtx context.Context, config *TcpConfig, logger *logrus.Logger) *TcpTransport {
+	// Create a derived context from the parent context
+	ctx, cancel := context.WithCancel(parentCtx)
+
+	// Initialize the TcpTransport struct
+	server := &TcpTransport{
+		config:    config,
+		parentctx: parentCtx,
+		logger:    logger,
+		limits:    newLimiter(Limits{MaxConnections: config.MaxConnections, BandwidthMbps: config.BandwidthMbps}),
+		rtt:       0,
+	}
+
+	// The first run is installed the same way every later one is, so there is
+	// only one path that ever writes it.
+	server.run.set(ctx, cancel)
+
+	return server
+}
+
+// Start brings up the first run, building its generation exactly the way
+// Restart builds every later one.
+//
+// It used to take the first generation's channels from fields on the transport,
+// and Restart never replaced those fields — it only built fresh channels for
+// the new generation. So the first run's channels stayed reachable from the
+// struct for the life of the process, and with them every connection still
+// queued in them, none of which was ever closed. Measured with a pool of 64:
+// 64 sockets still open after the client had gone and the run had been torn
+// down, and a forced GC did not release them — an unreachable net.Conn is
+// closed by its finalizer, but these were still reachable. Building the
+// generation here leaves nothing behind to pin.
+func (s *TcpTransport) Start() {
+	ctx := s.run.context()
+	s.start(&tcpGen{
+		ctx:            ctx,
+		tunnelChannel:  make(chan net.Conn, s.config.ChannelSize),
+		localChannel:   make(chan LocalTCPConn, s.config.ChannelSize),
+		reqNewConnChan: make(chan struct{}, s.config.ChannelSize),
+		// Buffered by one so a control channel that arrives in the moment
+		// between the listener starting and channelHandshake reaching its
+		// select is held rather than dropped.
+		handshakeChannel: make(chan controlCandidate, 1),
+		usageMonitor: web.NewDataStore(fmt.Sprintf(":%v", s.config.WebPort), ctx,
+			s.config.SnifferLog, s.config.Sniffer, s.status.get, s.logger),
+	})
+}
+
+// start runs one generation of the transport. Everything it needs is in g:
+// nothing in here reaches back for a field that the next Restart is entitled to
+// replace while this run is still using it.
+func (s *TcpTransport) start(g *tcpGen) {
+	s.status.set("Disconnected (TCP)")
+
+	if s.config.WebPort > 0 {
+		go g.usageMonitor.Monitor()
+	}
+
+	go s.tunnelListener(g)
+
+	s.channelHandshake(g)
+
+	if s.controlChannel.IsSet() {
+		s.status.set("Connected (TCP)")
+
+		numCPU := runtime.NumCPU()
+		if numCPU > 4 {
+			numCPU = 4 // Max allowed handler is 4
+		}
+
+		go s.parsePortMappings(g)
+		go s.channelHandler(g)
+
+		s.logger.Infof("starting %d handle loops on each CPU thread", numCPU)
+
+		for i := 0; i < numCPU; i++ {
+			go s.handleLoop(g)
+		}
+	}
+}
+func (s *TcpTransport) Restart() {
+	if !s.restartMutex.TryLock() {
+		s.logger.Warn("server restart already in progress, skipping restart attempt")
+		return
+	}
+	defer s.restartMutex.Unlock()
+
+	s.logger.Info("restarting server...")
+
+	// for removing timeout logs
+	level := s.logger.GetLevel()
+	s.logger.SetLevel(logrus.FatalLevel)
+
+	s.run.stop()
+
+	// Close open connection
+	if s.controlChannel.IsSet() {
+		s.controlChannel.Close()
+	}
+
+	// Wait for the listeners rather than guessing at how long they take.
+	//
+	// This was a flat two-second sleep, and the comment next to it said what it
+	// was for: the run being replaced still holds the ports, and binding them
+	// again before it lets go fails. A sleep is a guess — usually long enough,
+	// never a guarantee, and silently wrong on a loaded machine, which is
+	// exactly when a restart is most likely to be happening.
+	//
+	// listenerSet answers the question instead of approximating it. It is also
+	// faster in the ordinary case: a listener closes in microseconds, so this
+	// returns at once rather than always costing two seconds.
+	s.listeners.wait(s.parentctx)
+
+	// The whole tunnel may have been shut down while this restart was waiting —
+	// on a reload, or on the process going down. Rebuilding the run from a
+	// parent context that is already finished would bind the listeners again
+	// only to close them, and on a reload that means fighting the run that is
+	// replacing this one for its own ports. Nothing here is worth starting.
+	if s.parentctx.Err() != nil {
+		// The level was turned down to hide the timeouts a teardown produces;
+		// leaving it there would silence the shutdown itself.
+		s.logger.SetLevel(level)
+		// Abandoning is not a reason to keep claiming a peer.
+		//
+		// This branch used to return before the two lines below, which sit on
+		// the path that carries on — so a restart that gave up left the status
+		// reading "Connected" and left the peer published in the metrics
+		// snapshot. The process usually exits straight afterwards and the
+		// snapshot goes stale, which is why this was invisible; with a
+		// transport fallback chain it is not, because the chain cancels a
+		// candidate's context and the *process keeps running*. The snapshot
+		// then carries a fresh timestamp and a connected peer for a tunnel that
+		// is mid-rotation with nothing connected at all, and the watchdog
+		// reads that and calls it healthy.
+		//
+		// The run is over. Whatever ended it, there is no peer.
+		s.status.set("")
+		metrics.ClearPeer()
+		s.logger.Debug("restart abandoned: the tunnel is shutting down")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(s.parentctx)
+	s.run.set(ctx, cancel)
+
+	// The next run's state, built here and handed straight to start(). It used
+	// to be written onto the transport for start() to read back, which is a
+	// value published by one goroutine and read by another with nothing
+	// ordering them — the same shape as the ctx/cancel race the detector caught
+	// on kcp.go, and present on every one of these fields. Passing it removes
+	// the shared field rather than locking it.
+	g := &tcpGen{
+		ctx:              ctx,
+		tunnelChannel:    make(chan net.Conn, s.config.ChannelSize),
+		localChannel:     make(chan LocalTCPConn, s.config.ChannelSize),
+		reqNewConnChan:   make(chan struct{}, s.config.ChannelSize),
+		handshakeChannel: make(chan controlCandidate, 1),
+		usageMonitor:     web.NewDataStore(fmt.Sprintf(":%v", s.config.WebPort), ctx, s.config.SnifferLog, s.config.Sniffer, s.status.get, s.logger),
+	}
+
+	// Re-initialize variables
+	s.status.set("")
+	s.controlChannel.Clear()
+	metrics.ClearPeer()
+	// The next run issues its own nonce, so connections still carrying this
+	// one must stop being accepted the moment the run ends.
+	s.poolNonce.Clear()
+
+	// set the log level again
+	s.logger.SetLevel(level)
+
+	go s.start(g)
+}
+
+// channelHandshake waits for a connection that has already proved it holds the
+// token and asked to be the control channel.
+//
+// The proving happens on the accept path, in the candidate's own goroutine —
+// see announce.go — so this only has to publish the winner.
+func (s *TcpTransport) channelHandshake(g *tcpGen) {
+	select {
+	case <-g.ctx.Done():
+		return
+	case candidate := <-g.handshakeChannel:
+		// Order matters: the nonce has to be in place before the control
+		// channel is, or a pool connection racing in behind the handshake
+		// would be checked against a nonce that is not there yet.
+		s.poolNonce.Set(candidate.nonce)
+		s.controlChannel.Set(candidate.conn)
+		// The engine says whether it holds a control channel; the watchdog reads
+		// it rather than the socket table, which shows a socket long after the
+		// tunnel behind it has stopped working. See metrics.Snapshot.Connected.
+		metrics.ReportPeer(candidate.conn.RemoteAddr().String())
+
+		if candidate.nonce == "" {
+			s.logger.Warn(legacyPoolWarning)
+		}
+		s.logger.Info("control channel successfully established.")
+		return
+	}
+}
+
+func (s *TcpTransport) channelHandler(g *tcpGen) {
+	ticker := newLivenessTicker(s.config.Heartbeat)
+	defer ticker.Stop()
+
+	// Channel to receive the message or error
+	messageChan := make(chan byte, 1)
+
+	go func() {
+		for {
+			select {
+			case <-g.ctx.Done():
+				return
+			default:
+				message, err := utils.ReceiveBinaryByte(s.controlChannel.Get())
+				if err != nil {
+					// A generation that has already been cancelled must not ask for a
+					// restart. It used to test s.cancel != nil, which the constructor
+					// makes true before this code can run — so the guard was always
+					// open, and every goroutine dying during a teardown queued another
+					// restart of a tunnel that was on its way down. Asking the
+					// generation's own context is both the real question and a read
+					// nobody else writes: Restart replaces s.cancel while these
+					// goroutines are still running, which is the data race the CI
+					// detector caught on this line.
+					if g.ctx.Err() == nil {
+						s.logger.Error("failed to read from channel connection. ", err)
+						go s.Restart()
+					}
+					return
+				}
+				messageChan <- message
+			}
+		}
+	}()
+
+	// RTT measurment
+	rtt := time.Now()
+	err := utils.SendBinaryByteWithin(s.controlChannel.Get(), utils.SG_RTT, controlWriteTimeout)
+	if err != nil {
+		s.logger.Error("failed to send RTT signal, attempting to restart server...")
+		go s.Restart()
+		return
+	}
+
+	for {
+		select {
+		case <-g.ctx.Done():
+			_ = utils.SendBinaryByteWithin(s.controlChannel.Get(), utils.SG_Closed, controlWriteTimeout)
+			return
+
+		case <-g.reqNewConnChan:
+			err := utils.SendBinaryByteWithin(s.controlChannel.Get(), utils.SG_Chan, controlWriteTimeout)
+			if err != nil {
+				s.logger.Error("failed to send request new connection signal. ", err)
+				go s.Restart()
+				return
+			}
+
+		case <-ticker.C:
+			err := utils.SendBinaryByteWithin(s.controlChannel.Get(), utils.SG_HB, controlWriteTimeout)
+			if err != nil {
+				s.logger.Error("failed to send heartbeat signal")
+				go s.Restart()
+				return
+			}
+			s.logger.Trace("heartbeat signal sent successfully")
+
+		case message, ok := <-messageChan:
+			if !ok {
+				s.logger.Error("channel closed, likely due to an error in TCP read")
+				return
+			}
+
+			if message == utils.SG_Closed {
+				s.logger.Warn("control channel has been closed by the client")
+				go s.Restart()
+				return
+
+			} else if message == utils.SG_RTT {
+				measureRTT := time.Since(rtt)
+				s.rtt = measureRTT.Milliseconds()
+				s.logger.Infof("Round Trip Time (RTT): %d ms", s.rtt)
+			}
+		}
+	}
+}
+
+func (s *TcpTransport) tunnelListener(g *tcpGen) {
+	// Counted while this goroutine holds a listener, so Start can wait for the
+	// port rather than sleeping and hoping. See listeners.go.
+	s.listeners.hold()
+	defer s.listeners.release()
+
+	// The tunnel's own port is not optional, so a failed bind here cannot be
+	// skipped the way a forwarded port can — but it is no reason to exit
+	// either. Waiting and trying again is what the two real causes call for: a
+	// previous instance still shutting down, or the port in TIME_WAIT. Both
+	// clear on their own. See bindfail.go.
+	var backoff listenBackoff
+	var listener net.Listener
+	for {
+		var err error
+		listener, err = network.ListenWithBuffers(
+			"tcp",
+			s.config.BindAddr,
+			s.config.SO_RCVBUF,
+			s.config.SO_SNDBUF,
+			s.config.MSS,
+			s.config.KeepAlive,
+			!s.config.Nodelay,
+		)
+		if err == nil {
+			break
+		}
+		s.logger.Error(bindFailure("tunnel port", s.config.BindAddr, err))
+		if !backoff.wait(g.ctx) {
+			return
+		}
+	}
+
+	defer listener.Close()
+
+	s.logger.Infof("server started successfully, listening on address: %s", listener.Addr().String())
+
+	go s.acceptTunnelConn(g, listener)
+
+	<-g.ctx.Done()
+}
+
+func (s *TcpTransport) acceptTunnelConn(g *tcpGen, listener net.Listener) {
+	var backoff acceptBackoff
+	for {
+		select {
+		case <-g.ctx.Done():
+			return
+		default:
+			conn, err := listener.Accept()
+			if err != nil {
+				s.logger.Debugf("failed to accept tunnel connection on %s: %v", listener.Addr(), err)
+				// Back off rather than retry instantly: a closed listener fails
+				// immediately and forever, and `continue` would pin a core.
+				if !backoff.Fail(g.ctx) {
+					return
+				}
+				continue
+			}
+			backoff.OK()
+
+			//discard any non tcp connection
+			tcpConn, ok := conn.(*net.TCPConn)
+			if !ok {
+				s.logger.Warnf("disarded non-TCP tunnel connection from %s", conn.RemoteAddr().String())
+				conn.Close()
+				continue
+			}
+
+			// trying to set tcpnodelay
+			if !s.config.Nodelay {
+				if err := tcpConn.SetNoDelay(s.config.Nodelay); err != nil {
+					s.logger.Warnf("failed to set TCP_NODELAY for %s: %v", tcpConn.RemoteAddr().String(), err)
+				} else {
+					s.logger.Tracef("TCP_NODELAY disabled for %s", tcpConn.RemoteAddr().String())
+				}
+			}
+
+			// Set keep-alive settings
+			if err := tcpConn.SetKeepAlive(true); err != nil {
+				s.logger.Warnf("failed to enable TCP keep-alive for %s: %v", tcpConn.RemoteAddr().String(), err)
+			} else {
+				s.logger.Tracef("TCP keep-alive enabled for %s", tcpConn.RemoteAddr().String())
+			}
+			if err := tcpConn.SetKeepAlivePeriod(s.config.KeepAlive); err != nil {
+				s.logger.Warnf("failed to set TCP keep-alive period for %s: %v", tcpConn.RemoteAddr().String(), err)
+			}
+
+			// Everything from here — the stealth handshake, the announcement,
+			// the token or nonce check — happens in this connection's own
+			// goroutine, so a peer that connects and then says nothing costs
+			// one goroutine and never delays the connections behind it.
+			go s.admitTunnelConn(g, conn)
+		}
+	}
+}
+
+// admitTunnelConn takes one accepted connection through whatever it has to pass
+// before it can be used, and files it as a control channel or a pool
+// connection.
+func (s *TcpTransport) admitTunnelConn(g *tcpGen, raw net.Conn) {
+	conn := raw
+
+	// In stealth mode the Noise handshake is completed first, so everything
+	// after it — the announcement, the control channel, the data conns — reads
+	// and writes through the encrypted record layer without knowing it is
+	// there. A peer without the token fails here and gets no further.
+	if s.config.Stealth {
+		wrapped, err := network.NoiseServerConn(raw, s.config.Token, 15*time.Second)
+		if err != nil {
+			s.logger.Debugf("stealth handshake failed from %s: %v", raw.RemoteAddr(), err)
+			raw.Close()
+			return
+		}
+		conn = wrapped
+	}
+
+	// A legacy client says nothing on a pool connection — it dials and waits
+	// for the server to name a destination — so there is no announcement to
+	// read and the only thing separating it from a stranger's connection is
+	// the source address. Reading here would deadlock against such a client,
+	// so this branch stays exactly as it was, and is reachable only once a
+	// legacy control channel has been established (which is what leaves the
+	// nonce empty).
+	if s.controlChannel.IsSet() && s.poolNonce.Get() == "" {
+		// Read the peer address once: checking "is it set" and then asking for
+		// the address separately leaves a window where the control channel is
+		// cleared in between and the address comes back nil. Comparing through
+		// sameHost also handles IPv6 peers correctly.
+		if peer := s.controlChannel.RemoteAddr(); peer != nil && !sameHost(peer, conn.RemoteAddr()) {
+			s.logger.Debugf("suspicious packet from %v. expected address: %v. discarding packet...", conn.RemoteAddr(), peer)
+			conn.Close()
+			return
+		}
+		s.deliverTunnelConn(g, conn)
+		return
+	}
+
+	ann, err := readAnnouncement(conn)
+	if err != nil {
+		s.logger.Debugf("no announcement from %s: %v", conn.RemoteAddr(), err)
+		conn.Close()
+		return
+	}
+
+	switch {
+	case isControlSignal(ann.signal):
+		s.admitControlChannel(g, conn, ann)
+
+	case ann.signal == utils.SG_Pool:
+		// The nonce is this run's, so a connection carrying a previous run's —
+		// or none at all — is refused here rather than joining the pool.
+		if !s.poolNonce.Verify(ann.payload) {
+			s.logger.Warnf("pool connection from %s presented an invalid nonce, discarding", conn.RemoteAddr())
+			conn.Close()
+			return
+		}
+		s.deliverTunnelConn(g, conn)
+
+	default:
+		s.logger.Warnf("unexpected announcement %d from %s, discarding", ann.signal, conn.RemoteAddr())
+		conn.Close()
+	}
+}
+
+// admitControlChannel verifies a peer claiming the control channel, answers it,
+// and offers it as the candidate for channelHandshake to publish.
+func (s *TcpTransport) admitControlChannel(g *tcpGen, conn net.Conn, ann announcement) {
+	if !tokenMatches(ann.payload, s.config.Token) {
+		s.logger.Warnf("invalid security token received from %s — telling it so, rather than "+
+			"closing without a word, which reads to the client exactly like an old server", conn.RemoteAddr())
+		refuseControl(conn, utils.RefusedBadToken)
+		return
+	}
+
+	// Plain TCP carries no mux sessions, so there is no version to settle: 0
+	// tells the client there is nothing to apply.
+	ack, nonce, _, err := controlAck(ann.signal, s.config.Token, 0)
+	if err != nil {
+		s.logger.Errorf("could not answer the control handshake: %v", err)
+		conn.Close()
+		return
+	}
+	if err := utils.SendBinaryTransportString(conn, ack, ann.signal); err != nil {
+		s.logger.Errorf("failed to send security token: %v", err)
+		conn.Close()
+		return
+	}
+
+	// A control claim while one is already established means the client
+	// restarted on its own and re-dialed, while this run never noticed because
+	// the old connection has not failed a read yet. Now that the token has
+	// proved the claim genuine, adopt the new client by rebuilding the run —
+	// the listener it is retrying against comes back up as part of that
+	// restart. The same fix the udp, kcp, quic and websocket transports carry.
+	//
+	// This used to refuse the claim with RefusedInUse and keep the old channel,
+	// which is only right when there really are two clients. The far more
+	// common case is one client whose path died silently: nothing on this side
+	// reads the control channel with a deadline, and a heartbeat written into a
+	// dead-but-unreset socket lands in the send buffer and reports success — so
+	// the server can hold a channel that has been gone for a long time. The
+	// client, which does keep a read deadline, notices in seconds and re-dials
+	// into a refusal it can do nothing about. The operator sees "the server
+	// already has a control channel from somebody else" for a tunnel that has
+	// exactly one client, and the tunnel stays down until somebody restarts the
+	// service by hand.
+	//
+	// The token is what makes this safe to do: a peer that cannot present it
+	// gets no further than the check above, so this cannot be used to knock a
+	// tunnel over from outside.
+	if s.controlChannel.IsSet() {
+		s.logger.Warn("a new control channel claim arrived; restarting to adopt the new client")
+		conn.Close()
+		go s.Restart()
+		return
+	}
+
+	select {
+	case g.handshakeChannel <- controlCandidate{conn: conn, nonce: nonce}:
+	default:
+		// channelHandshake has not begun reading in this run yet: a genuine
+		// duplicate racing the first claim, rather than a re-dial.
+		s.logger.Warn("control channel handshake already in progress, discarding duplicate")
+		conn.Close()
+	}
+}
+
+// deliverTunnelConn hands an admitted connection to the pool, dropping it if
+// the pool is full.
+func (s *TcpTransport) deliverTunnelConn(g *tcpGen, conn net.Conn) {
+	select {
+	case g.tunnelChannel <- conn:
+	default: // The channel is full, do nothing
+		s.logger.Warnf("forwarded port: the queue is full, dropping a client from %s", conn.RemoteAddr().String())
+		conn.Close()
+	}
+}
+
+func (s *TcpTransport) parsePortMappings(g *tcpGen) {
+	for _, portMapping := range s.config.Ports {
+		parts := strings.Split(portMapping, "=")
+		// A mapping that cannot be read is one mapping. It used to end the
+		// process — and under a unit that restarts every three seconds, one
+		// typo then became a crash loop instead of a message. Said once and
+		// skipped: the tunnel and its other ports are unaffected.
+		if len(parts) > 2 {
+			s.logger.Errorf("ignoring the port mapping %q: it has more than one '='", portMapping)
+			continue
+		}
+
+		// The left-hand side may name a local address as well as a port or a
+		// range, so one machine can serve different exposed ports on different
+		// local IPs. See expandListenSpec.
+		listens, err := expandListenSpec(parts[0])
+		if err != nil {
+			s.logger.Errorf("ignoring the port mapping %q: %v", portMapping, err)
+			continue
+		}
+
+		var remoteAddr string
+		if len(parts) == 2 {
+			remoteAddr = strings.TrimSpace(parts[1])
+		}
+
+		for _, l := range listens {
+			// A mapping that named no destination forwards each port to itself.
+			target := remoteAddr
+			if target == "" {
+				target = l.port
+			}
+			go s.startListeners(g, l.addr, target)
+			if len(listens) > 1 {
+				time.Sleep(1 * time.Millisecond) // for wide port ranges
+			}
+		}
+	}
+}
+
+func (s *TcpTransport) startListeners(g *tcpGen, localAddr, remoteAddr string) {
+	// Start TCP listener
+	go s.localListener(g, localAddr, remoteAddr)
+
+	s.logger.Debugf("Started listening on %s, forwarding to %s", localAddr, remoteAddr)
+}
+
+func (s *TcpTransport) localListener(g *tcpGen, localAddr string, remoteAddr string) {
+	// Counted while this goroutine holds a listener, so Start can wait for the
+	// port rather than sleeping and hoping. See listeners.go.
+	s.listeners.hold()
+	defer s.listeners.release()
+
+	listener, err := net.Listen("tcp", localAddr)
+	if err != nil {
+		// One forwarded port that cannot be bound is one forwarded port. The
+		// tunnel and every other port it carries are unaffected, so this says
+		// so and gives up on this one alone. See bindfail.go.
+		s.logger.Error(bindFailure("forwarded port", localAddr, err))
+		return
+	}
+
+	defer listener.Close()
+
+	s.logger.Infof("listener started successfully, listening on address: %s", listener.Addr().String())
+
+	go s.acceptLocalConn(g, listener, remoteAddr)
+	// The same forwarded port, carrying datagrams. A flow is handed over as a
+	// net.Conn, so from here down it is paired with a tunnel connection, piped,
+	// counted and torn down by exactly the code that does it for TCP.
+	if s.config.AcceptUDP {
+		go startUDPForward(g.ctx, s.logger, localAddr, remoteAddr,
+			udpAdmitter(g.ctx, g.localChannel, g.reqNewConnChan, s.limits))
+	}
+
+	<-g.ctx.Done()
+}
+
+func (s *TcpTransport) acceptLocalConn(g *tcpGen, listener net.Listener, remoteAddr string) {
+	var backoff acceptBackoff
+	for {
+		select {
+		case <-g.ctx.Done():
+			return
+
+		default:
+			conn, err := listener.Accept()
+			if err != nil {
+				s.logger.Debugf("failed to accept connection on %s: %v", listener.Addr(), err)
+				// One of these runs per forwarded port, so an instant retry on a
+				// broken listener would pin a core per port. See acceptBackoff.
+				if !backoff.Fail(g.ctx) {
+					return
+				}
+				continue
+			}
+			backoff.OK()
+
+			// discard any non-tcp connection
+			tcpConn, ok := conn.(*net.TCPConn)
+			if !ok {
+				s.logger.Warnf("disarded non-TCP connection from %s", conn.RemoteAddr().String())
+				conn.Close()
+				continue
+			}
+
+			// trying to disable tcpnodelay
+			if !s.config.Nodelay {
+				if err := tcpConn.SetNoDelay(s.config.Nodelay); err != nil {
+					s.logger.Warnf("failed to set TCP_NODELAY for %s: %v", tcpConn.RemoteAddr().String(), err)
+				} else {
+					s.logger.Tracef("TCP_NODELAY disabled for %s", tcpConn.RemoteAddr().String())
+				}
+			}
+
+			// Enforce the tunnel's limits before the connection costs anything:
+			// a refused connection should be refused here, not after it has
+			// taken a slot in the pool.
+			if !s.limits.acquire() {
+				s.logger.Warnf("connection limit reached, refusing %s", conn.RemoteAddr())
+				conn.Close()
+				continue
+			}
+			conn = s.limits.wrap(g.ctx, conn)
+
+			select {
+			case g.localChannel <- LocalTCPConn{conn: conn, remoteAddr: remoteAddr, timeCreated: time.Now().UnixMilli()}:
+
+				select {
+				case g.reqNewConnChan <- struct{}{}:
+					// Successfully requested a new connection
+				default:
+					// The channel is full, do nothing
+					s.logger.Warn("channel is full, cannot request a new connection")
+				}
+
+				s.logger.Debugf("forwarded port: accepted a client from %s", tcpConn.RemoteAddr().String())
+
+			default: // channel is full, discard the connection
+				// The client that was dropped, not this machine. It used to
+				// print LocalAddr here — so every one of these lines named the
+				// server's own address and port, which reads as the server
+				// connecting to itself thousands of times a second and sends
+				// anybody debugging it in the wrong direction entirely.
+				s.logger.Warnf("forwarded port %s: the queue is full, dropping a client from %s", listener.Addr().String(), tcpConn.RemoteAddr().String())
+				s.limits.release()
+				conn.Close()
+			}
+		}
+	}
+}
+
+func (s *TcpTransport) handleLoop(g *tcpGen) {
+	for {
+		select {
+		case <-g.ctx.Done():
+			return
+		case localConn := <-g.localChannel:
+			// A connection that sat in the queue past its deadline is not worth
+			// giving a fresh timer to.
+			if expired(localConn) {
+				drop(localConn, s.limits, s.logger)
+				continue
+			}
+			pairing[net.Conn]{
+				ctx: g.ctx, local: localConn, tunnel: g.tunnelChannel,
+				limits: s.limits, log: s.logger,
+				announce: func(c net.Conn, addr string) error {
+					return utils.SendBinaryTransportString(c, addr, utils.SG_TCP)
+				},
+				discard: func(c net.Conn) { c.Close() },
+				relay: func(c net.Conn, local LocalTCPConn) {
+					go func() {
+						// Free the connection slot once the transfer ends, or
+						// the limit would fill up permanently.
+						defer s.limits.release()
+						handlers.TCPConnectionHandler(g.ctx,
+							s.config.ProxyProtocol && !isUDPFlow(local.conn),
+							local.conn, metrics.CountedConn(c), s.logger,
+							g.usageMonitor, localForwardPort(local.conn), s.config.Sniffer)
+					}()
+				},
+			}.run()
+		}
+	}
+}
