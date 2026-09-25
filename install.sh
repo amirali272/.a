@@ -5,9 +5,8 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/AminMGMT/BackPack/main/install.sh)
 #
 # It downloads the prebuilt release tar.gz for this architecture into
-# /root/BackPack and installs the binary.
-# If run inside a source checkout and the download fails, it builds from
-# source as a last resort.
+# /root/BackPack and installs the binary. If run inside a source checkout and
+# the download fails, it builds from source as a last resort.
 #
 # When it finishes it opens the menu automatically (on an interactive terminal).
 # Later, reopen it any time with:  sudo backpack
@@ -24,9 +23,6 @@ BIN_PATH="/usr/local/bin/backpack"
 INSTALL_DIR="/root/BackPack"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/tmp}")" 2>/dev/null && pwd || echo /tmp)"
 
-# Which Go the source build needs, and the oldest toolchain already on the
-# machine that is usable for it. Read from go.mod whenever it is beside this
-# script, because go.mod is what actually decides.
 GO_VERSION="1.26.6"
 GO_MIN_MINOR=26
 if [[ -f "$SCRIPT_DIR/go.mod" ]]; then
@@ -47,7 +43,6 @@ if [[ $# -gt 0 ]]; then
   exit 2
 fi
 
-# Which release asset this machine can run.
 arm_variant() {
   case "$(uname -m)" in
     armv7*) echo 7; return ;;
@@ -74,18 +69,16 @@ esac
 ASSET="backpack_linux_${ARCH}.tar.gz"
 mkdir -p /etc/backpack "$INSTALL_DIR/backups"
 
-# fetch <url> <out> — straight to GitHub, so TLS terminates there.
 fetch() {
   local url="$1" out="$2"
   info "Downloading: ${url}"
   curl -fSL --connect-timeout 15 "$url" -o "$out" 2>/dev/null
 }
 
-# trusted_dir <dir> — true when an arbitrary local account cannot put a file in it.
 trusted_dir() {
   local dir="$1" perms
   perms="$(stat -c '%a' "$dir" 2>/dev/null)" || return 1
-  perms="${perms: -3}"   # drop setuid/sticky if stat printed four digits
+  perms="${perms: -3}"
   (( (${perms:2:1} & 2) == 0 ))
 }
 
@@ -121,29 +114,78 @@ install_binary_from_tar() {
 # Build-from-source fallback (only used when the release download fails and
 # this script sits inside a source checkout).
 # ---------------------------------------------------------------------------
+# The checksums Go publishes for the toolchain this build needs.
+GO_SHA_VERSION="1.26.6"
+GO_SHA256_amd64="708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89"
+GO_SHA256_arm64="d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e"
+GO_SHA256_386="f09a71029fc5cd2940fbe36b0eb1fb2d8f3407cd6adb6b7b4de3eaf04007f8c4"
+GO_SHA256_s390x="958757933d38172dd544085d253c8738cf09793d24c8bc0422e5e1e1fffa4fde"
+GO_SHA256_armv6l="e1379a2fe77bd30fa29833074388247e7c65416e09279f746f20de2d5cf4dfea"
 
-# go_arch maps this script's asset architecture onto the one Go names its
-# toolchain with.
 go_arch() {
   case "$1" in
-    armv*) echo "armv6l" ;;   # one 32-bit ARM toolchain, usable on v6 and v7
+    armv*) echo "armv6l" ;;
     *)     echo "$1" ;;
   esac
 }
 
+go_sha256() {
+  local var="GO_SHA256_$1"
+  echo "${!var-}"
+}
+
 download_go() {
-  local garch file out
+  local garch file out want got
   garch="$(go_arch "$ARCH")"
   file="go${GO_VERSION}.linux-${garch}.tar.gz"
   out="$1"
+  want="$(go_sha256 "$garch")"
+
+  if [[ "$GO_VERSION" != "$GO_SHA_VERSION" ]]; then
+    err "This installer carries Go checksums for ${GO_SHA_VERSION}, but go.mod asks"
+    err "for ${GO_VERSION}. The toolchain cannot be verified, so it will not be"
+    err "downloaded."
+    err "Fix: update GO_SHA_VERSION and the GO_SHA256_* values in install.sh from"
+    err "     https://go.dev/dl/?mode=json&include=all"
+    err "Or install Go ${GO_VERSION} or newer yourself and run this again."
+    return 1
+  fi
+  if [[ -z "$want" ]]; then
+    err "No pinned Go checksum for ${garch} in this installer, so the toolchain"
+    err "cannot be verified and will not be downloaded."
+    err "Install Go ${GO_VERSION} or newer yourself and run this again, or use"
+    err "the offline install — see the README."
+    return 1
+  fi
 
   for u in "https://go.dev/dl/${file}" \
            "https://golang.google.cn/dl/${file}" \
            "https://mirrors.aliyun.com/golang/${file}"; do
     info "Trying ${u}"
     curl -fsSL --connect-timeout 15 "$u" -o "$out" || { warn "source failed, trying next..."; continue; }
-    info "Downloaded Go toolchain from ${u}"
-    return 0
+
+    if command -v sha256sum >/dev/null 2>&1; then
+      got="$(sha256sum "$out" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      got="$(shasum -a 256 "$out" | awk '{print $1}')"
+    else
+      err "Neither sha256sum nor shasum is available, so the Go toolchain cannot"
+      err "be verified. Refusing to unpack it."
+      rm -f "$out"
+      return 1
+    fi
+
+    if [[ "$got" == "$want" ]]; then
+      info "Go toolchain checksum verified: ${got:0:16}..."
+      return 0
+    fi
+
+    err "CHECKSUM MISMATCH for ${file} from ${u}"
+    err "  expected: ${want}"
+    err "  actual:   ${got}"
+    err "That source served something other than the published toolchain."
+    rm -f "$out"
+    warn "trying next source..."
   done
   return 1
 }
@@ -163,7 +205,6 @@ ensure_go() {
 build_from_source() {
   cd "$SCRIPT_DIR"
   ensure_go; export PATH="/usr/local/go/bin:$PATH"
-  # Direct module fetching first, Iran-friendly mirrors as fallback.
   export GOPROXY="https://proxy.golang.org,https://mirror-go.runflare.com,https://goproxy.cn,direct"
   export GOSUMDB=off GOTOOLCHAIN=local
   info "Building from source (proxy order: direct first, then mirrors)."
@@ -192,7 +233,6 @@ chmod +x "$BIN_PATH"
 echo
 echo -e "${WHITE}Done!${NC}"
 
-# Open the menu straight away — people miss the "now run sudo backpack" step.
 if [ -t 0 ]; then
   echo -e "Starting the menu... ${GRAY}(next time, just run ${NC}${RED}sudo backpack${GRAY})${NC}"
   echo
